@@ -184,6 +184,36 @@ GET /predict/season?player_name=Justin%20Jefferson
 
 ---
 
+## Edge Case Handling
+
+The system is designed to handle real-world roster and schedule irregularities gracefully rather than crashing or returning misleading results.
+
+### Bye Weeks (Game Mode)
+When a week is requested that falls on the player's team bye, the backend detects the absence of a scheduled game and returns a structured response with `predicted_ppr_points: 0.0` and `is_bye: true` instead of throwing an error. The UI renders a result card showing "BYE WEEK" in place of the opponent, a predicted score of 0.0, and a red "Bye Week — No Game Scheduled" banner. Bye weeks are also rendered explicitly as their own rows in the season projection table so the 17-game structure is always visible.
+
+### Did Not Play (DNP)
+A player may be on an active roster for a given week but not suit up due to injury, illness, or a coach's decision. In this case the weekly stats dataset contains no row for that player that week, making their actual PPR indistinguishable from a missing value at a glance. The system handles this by checking whether a game was scheduled for the team that week: if a game exists but no actual stats are found, the week is flagged `dnp: true`.
+
+- **Game mode:** The prediction card still displays the projected score (a legitimate pre-game projection), but a yellow "Player did not play this game" banner is shown below it. No actual/error comparison is rendered.
+- **Season mode:** The Actual column shows *DNP* in italic rather than a dash. DNP weeks are excluded from both the season actual total and the accuracy badge (% within MAE), so they don't inflate or deflate the model's measured performance.
+
+### Off-Season Trades and Team Changes
+When building a season projection or game prediction, the backend first looks up the player's team from 2025 weekly data (if they have appeared in any 2025 game). Only if no 2025 entry exists does it fall back to the player's 2024 team. This means players who were traded or signed as free agents before the 2025 season are projected against the correct team's schedule.
+
+### Players Without 2024 Data
+The feature vector is built entirely from 2024 end-of-season rolling stats. If a player has no 2024 data (e.g. retired after 2023, or a 2025 rookie), the backend returns a `404` with a clear message:
+
+```
+'<name>' not found in 2024 stats. Only players with 2024 data can be projected.
+```
+
+This is surfaced as an error banner in the UI.
+
+### Autocomplete Scope
+The player search endpoint queries the 2025 stats dataset, so only players who appeared in at least one 2025 regular-season game are returned as suggestions. This prevents users from accidentally selecting a player the system cannot meaningfully project.
+
+---
+
 ## PPR Scoring Formula
 
 | Stat | Points |
