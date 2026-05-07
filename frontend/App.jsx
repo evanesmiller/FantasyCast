@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import PlayerSearch from './PlayerSearch'
 import ResultCard   from './ResultCard'
 import SeasonCard   from './SeasonCard'
@@ -12,6 +12,8 @@ export default function App() {
   const [seasonResult,   setSeasonResult]   = useState(null)
   const [loading,        setLoading]        = useState(false)
   const [error,          setError]          = useState(null)
+  const [modelName,      setModelName]      = useState(null)   // null = auto/optimal
+  const [modelInfo,      setModelInfo]      = useState({})     // from /models endpoint
 
   function handleModeChange(newMode) {
     setMode(newMode)
@@ -19,6 +21,10 @@ export default function App() {
     setSeasonResult(null)
     setError(null)
   }
+
+  useEffect(() => {
+    fetch('/models').then(r => r.json()).then(setModelInfo).catch(() => {})
+  }, [])
 
   async function handlePredict() {
     if (!selectedPlayer) return
@@ -29,15 +35,16 @@ export default function App() {
 
     try {
       if (mode === 'season') {
-        const res = await fetch(`/predict/season?player_name=${encodeURIComponent(selectedPlayer)}`)
+        const url = `/predict/season?player_name=${encodeURIComponent(selectedPlayer)}${modelName ? `&model_name=${encodeURIComponent(modelName)}` : ''}`
+        const res = await fetch(url)
         if (!res.ok) {
           const err = await res.json()
           throw new Error(err.detail || 'Season projection failed')
         }
         setSeasonResult(await res.json())
       } else {
-        const body = { player_name: selectedPlayer }
-        if (week) body.week = parseInt(week)
+        const body = { player_name: selectedPlayer, week: parseInt(week) }
+        if (modelName) body.model_name = modelName
 
         const res = await fetch('/predict', {
           method:  'POST',
@@ -68,7 +75,7 @@ export default function App() {
     textTransform: 'uppercase',
   }
 
-  const canPredict = selectedPlayer && !loading
+  const canPredict = selectedPlayer && !loading && (mode === 'season' || week !== '')
 
   const panelStyle = {
     border:        '1px solid var(--border)',
@@ -110,7 +117,7 @@ export default function App() {
             <span style={{ color: 'var(--gold)' }}>Cast</span>
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', letterSpacing: '0.04em', margin: '10px 0 0 0' }}>
-            PPR · QB · RB · WR · TE
+            PPR Adjusted - QB · RB · WR · TE
           </p>
         </div>
       </header>
@@ -183,12 +190,56 @@ export default function App() {
               <PlayerSearch onSelect={setSelectedPlayer} />
             </div>
 
+            {/* Model selector */}
+            <div>
+              <label style={labelStyle}>Model</label>
+              {(() => {
+                // Build { "XGBoost": ["QB", "WR"], ... }
+                const bestByModel = {}
+                for (const [pos, info] of Object.entries(modelInfo)) {
+                  if (!bestByModel[info.best]) bestByModel[info.best] = []
+                  bestByModel[info.best].push(pos)
+                }
+
+                const MODEL_NAMES = ['Linear Regression', 'Random Forest', 'Gradient Boosting', 'XGBoost']
+
+                return (
+                  <select
+                    value={modelName || ''}
+                    onChange={e => setModelName(e.target.value || null)}
+                    style={{
+                      background:   'var(--surface)',
+                      border:       '2px solid var(--border)',
+                      color:        'var(--text)',
+                      fontFamily:   "'Barlow Condensed', sans-serif",
+                      fontWeight:   600,
+                      fontSize:     '1.1rem',
+                      padding:      '12px 16px',
+                      borderRadius: 8,
+                      width:        '100%',
+                      outline:      'none',
+                      boxSizing:    'border-box',
+                      cursor:       'pointer',
+                      appearance:   'none',
+                      transition:   'border-color 0.15s',
+                    }}
+                    onFocus={e => (e.target.style.borderColor = 'var(--gold)')}
+                    onBlur={e  => (e.target.style.borderColor = 'var(--border)')}
+                  >
+                    {MODEL_NAMES.map(name => (
+                      <option key={name} value={name}>
+                        {name}{bestByModel[name] ? ` — Best for ${bestByModel[name].join(', ')}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )
+              })()}
+            </div>
+
             {/* Week — game mode only */}
             {mode === 'game' && (
               <div>
-                <label style={labelStyle}>
-                  Week <span style={{ opacity: 0.4, fontWeight: 400 }}>(optional)</span>
-                </label>
+                <label style={labelStyle}>Week</label>
                 <input
                   type="number"
                   min="1"
@@ -290,12 +341,7 @@ export default function App() {
         </div>
       </main>
 
-      {/* Footer */}
-      <footer style={{ padding: '20px 24px', textAlign: 'center', color: 'rgba(230,237,243,0.18)', fontSize: '0.75rem', letterSpacing: '0.08em' }}>
-        nfl_data_py · scikit-learn · FastAPI
-      </footer>
-
-      <style>{`
+<style>{`
         @keyframes spin {
           to { transform: rotate(360deg); }
         }

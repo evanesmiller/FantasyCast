@@ -58,13 +58,31 @@ model_bundles: dict = {}
 def load_models():
     global model_bundles
     for pos in POSITIONS:
-        path = os.path.join(MODELS_DIR, f"best_model_{pos}.joblib")
-        if not os.path.exists(path):
+        path_new = os.path.join(MODELS_DIR, f"models_{pos}.joblib")
+        path_old = os.path.join(MODELS_DIR, f"best_model_{pos}.joblib")
+        if os.path.exists(path_new):
+            bundle = joblib.load(path_new)
+            model_bundles[pos] = bundle
+            print(f"✅ {pos}: best={bundle['best']}, {len(bundle['models'])} models loaded")
+        elif os.path.exists(path_old):
+            old = joblib.load(path_old)
+            model_bundles[pos] = {
+                "models":       {old["model_name"]: old["model"]},
+                "best":         old["model_name"],
+                "feature_cols": old["feature_cols"],
+                "metrics":      {old["model_name"]: old["metrics"]},
+            }
+            print(f"⚠️  {pos}: legacy bundle ({old['model_name']} only)")
+        else:
             print(f"⚠️  No model for {pos} — run train_models.py first.")
-            continue
-        bundle = joblib.load(path)
-        model_bundles[pos] = bundle
-        print(f"✅ {pos}: {bundle['model_name']}  (MAE: {bundle['metrics']['MAE']:.2f})")
+
+
+def _resolve_model(bundle: dict, model_name: str | None) -> tuple:
+    """Returns (model, name_used, mae) — uses override or position-best."""
+    if model_name and model_name in bundle["models"]:
+        return bundle["models"][model_name], model_name, bundle["metrics"][model_name]["MAE"]
+    best = bundle["best"]
+    return bundle["models"][best], best, bundle["metrics"][best]["MAE"]
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +220,7 @@ def _lookup_actual_2025(display_name: str, week: int) -> float | None:
 class PredictRequest(BaseModel):
     player_name: str
     week:        int | None = None
+    model_name:  str | None = None
 
 
 class PredictResponse(BaseModel):
@@ -243,7 +262,7 @@ class SeasonPredictResponse(BaseModel):
 # Routes
 # ---------------------------------------------------------------------------
 
-_CHART_ALLOWLIST = {"model_comparison.png", "position_accuracy.png", "feature_importance.png"}
+_CHART_ALLOWLIST = {"model_comparison.png", "position_accuracy.png", "feature_importance.png", "regression_lines.png"}
 
 @app.get("/charts/{filename}")
 def get_chart(filename: str):
@@ -273,6 +292,21 @@ def search_players(q: str):
     return {"results": matches}
 
 
+@app.get("/models")
+def get_models():
+    return {
+        pos: {
+            "best":    bundle["best"],
+            "options": list(bundle["models"].keys()),
+            "metrics": {
+                name: {"MAE": round(m["MAE"], 3), "R2": round(m["R2"], 3)}
+                for name, m in bundle["metrics"].items()
+            },
+        }
+        for pos, bundle in model_bundles.items()
+    }
+
+
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
     if not model_bundles:
@@ -287,6 +321,7 @@ def predict(req: PredictRequest):
         raise HTTPException(503, f"No model loaded for position {pos}.")
 
     bundle = model_bundles[pos]
+    model, model_used, model_mae = _resolve_model(bundle, req.model_name)
     week   = req.week if req.week is not None else 1
 
     # Determine player's 2025 team (handles off-season moves)
@@ -315,8 +350,8 @@ def predict(req: PredictRequest):
                 player_name=display_name,
                 position=pos,
                 predicted_ppr_points=0.0,
-                model_used=bundle["model_name"],
-                model_mae=round(bundle["metrics"]["MAE"], 2),
+                model_used=model_used,
+                model_mae=round(model_mae, 2),
                 note=f"Week {week} is {team}'s bye week.",
                 is_bye=True,
             )
@@ -326,7 +361,7 @@ def predict(req: PredictRequest):
         opp_def  = get_opp_defense_2024().get((opponent, pos), opp_def)
 
     X          = assemble_vector(rolling_stats, feature_cols, opp_def, is_home, week, pos)
-    prediction = max(0.0, round(float(bundle["model"].predict(X)[0]), 2))
+    prediction = max(0.0, round(float(model.predict(X)[0]), 2))
     actual_ppr = _lookup_actual_2025(display_name, week) if req.week is not None else None
     dnp        = (opponent is not None and actual_ppr is None)
 
@@ -335,9 +370,9 @@ def predict(req: PredictRequest):
         position=pos,
         predicted_ppr_points=prediction,
         actual_ppr_points=actual_ppr,
-        model_used=bundle["model_name"],
-        model_mae=round(bundle["metrics"]["MAE"], 2),
-        note=f"±{bundle['metrics']['MAE']:.1f} pts typical error",
+        model_used=model_used,
+        model_mae=round(model_mae, 2),
+        note=f"±{model_mae:.1f} pts typical error",
         opponent=opponent,
         is_home=bool(is_home) if opponent else None,
         dnp=dnp,
@@ -345,7 +380,7 @@ def predict(req: PredictRequest):
 
 
 @app.get("/predict/season", response_model=SeasonPredictResponse)
-def predict_season(player_name: str):
+def predict_season(player_name: str, model_name: str | None = None):
     if not model_bundles:
         raise HTTPException(503, "No models loaded. Run train_models.py first.")
 
@@ -358,6 +393,7 @@ def predict_season(player_name: str):
         raise HTTPException(503, f"No model loaded for position {pos}.")
 
     bundle      = model_bundles[pos]
+    model, model_used, model_mae = _resolve_model(bundle, model_name)
     opp_defense = get_opp_defense_2024()
     schedule    = get_schedule_2025()
     w25         = get_player_stats_2025()
@@ -397,7 +433,7 @@ def predict_season(player_name: str):
 
         opp_def = opp_defense.get((opponent, pos), global_avg)
         X       = assemble_vector(rolling_stats, feature_cols, opp_def, int(is_home), week_num, pos)
-        pred    = max(0.0, round(float(bundle["model"].predict(X)[0]), 2))
+        pred    = max(0.0, round(float(model.predict(X)[0]), 2))
         actual  = _lookup_actual_2025(display_name, week_num)
 
         weeks_result.append(SeasonWeek(
@@ -415,8 +451,8 @@ def predict_season(player_name: str):
         player_name=display_name,
         position=pos,
         team=team,
-        model_used=bundle["model_name"],
-        model_mae=round(bundle["metrics"]["MAE"], 2),
+        model_used=model_used,
+        model_mae=round(model_mae, 2),
         weeks=weeks_result,
         season_total_predicted=total_pred,
         season_total_actual=total_actual,

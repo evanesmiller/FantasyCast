@@ -126,7 +126,10 @@ def plot_model_comparison(all_pos_results: dict):
             continue
         results = all_pos_results[pos]
         maes    = [results[m]["MAE"] for m in model_names]
+        y_min   = max(0, min(maes) * 0.88)          # start just below the best bar
+        y_max   = max(maes) + (max(maes) - y_min) * 0.18   # headroom for labels
         bars    = ax.bar(model_names, maes, color=bar_colors)
+        ax.set_ylim(y_min, y_max)
         ax.set_title(pos, fontsize=13, fontweight="bold", color=POS_COLORS[pos])
         ax.set_ylabel("MAE (pts)")
         ax.set_xticks(range(len(model_names)))
@@ -135,7 +138,7 @@ def plot_model_comparison(all_pos_results: dict):
         for i, (bar, val) in enumerate(zip(bars, maes)):
             bar.set_edgecolor("black" if i == best_idx else "none")
             bar.set_linewidth(2 if i == best_idx else 0)
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + (y_max - y_min) * 0.01,
                     f"{val:.2f}", ha="center", fontsize=8)
 
     plt.tight_layout()
@@ -159,26 +162,86 @@ def plot_position_accuracy(best_pos_results: dict):
                  fontsize=13, fontweight="bold")
 
     ax = axes[0]
+    mae_min = max(0, min(maes) * 0.88)
+    mae_max = max(maes) + (max(maes) - mae_min) * 0.18
     bars = ax.bar(pos_list, maes, color=colors)
+    ax.set_ylim(mae_min, mae_max)
     ax.set_ylabel("MAE (points)")
     ax.set_title("Mean Absolute Error (lower = better)")
     for bar, val, n, name in zip(bars, maes, counts, names):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + (mae_max - mae_min) * 0.01,
                 f"{val:.2f}\n{name}\nn={n:,}", ha="center", fontsize=8)
 
     ax = axes[1]
+    r2_min = 0
+    r2_max = max(r2s) + max(r2s) * 0.18
     bars = ax.bar(pos_list, r2s, color=colors)
-    ax.set_ylim(0, 1)
+    ax.set_ylim(r2_min, r2_max)
     ax.set_ylabel("R²")
     ax.set_title("R² Score (higher = better)")
     for bar, val in zip(bars, r2s):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + (r2_max - r2_min) * 0.01,
                 f"{val:.3f}", ha="center", fontsize=10)
 
     plt.tight_layout()
     path = os.path.join(MODELS_DIR, "position_accuracy.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     print(f"   ✅ Position accuracy chart saved to {path}")
+    plt.close()
+
+
+def plot_regression_lines(all_pos_results: dict, best_pos_results: dict):
+    """2x2 grid — predicted vs actual scatter with regression line per position."""
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    fig.suptitle("Predicted vs Actual PPR Points by Position (2025 Test Set)",
+                 fontsize=14, fontweight="bold")
+
+    for ax, pos in zip(axes.flat, POSITIONS):
+        if pos not in all_pos_results or pos not in best_pos_results:
+            ax.set_visible(False)
+            continue
+
+        best_name = best_pos_results[pos]["name"]
+        res    = all_pos_results[pos][best_name]
+        y_pred = np.clip(res["preds"], 0, None)
+        y_true = res["y"]
+        color  = POS_COLORS[pos]
+        mae    = res["MAE"]
+        r2     = res["R2"]
+
+        upper = max(float(y_pred.max()), float(y_true.max())) * 1.08
+        ax.set_xlim(0, upper)
+        ax.set_ylim(0, upper)
+
+        # Scatter — semi-transparent to show density
+        ax.scatter(y_pred, y_true, alpha=0.28, s=14, color=color, linewidths=0, zorder=2)
+
+        # Perfect prediction reference line (y = x)
+        ax.plot([0, upper], [0, upper], "--", color="#aaaaaa", linewidth=1.2,
+                label="Perfect prediction", zorder=3)
+
+        # Regression line fitted to predicted vs actual
+        m, b   = np.polyfit(y_pred, y_true, 1)
+        x_line = np.array([0.0, upper])
+        ax.plot(x_line, m * x_line + b, "-", color=color, linewidth=2.2,
+                label=f"Regression (slope={m:.2f})", zorder=4)
+
+        ax.set_title(f"{pos} — {best_name}", fontsize=12, fontweight="bold", color=color)
+        ax.set_xlabel("Predicted PPR Points", fontsize=10)
+        ax.set_ylabel("Actual PPR Points", fontsize=10)
+        ax.text(0.05, 0.95, f"MAE = {mae:.2f}  |  R² = {r2:.3f}",
+                transform=ax.transAxes, fontsize=9, verticalalignment="top",
+                bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                          alpha=0.85, edgecolor="#cccccc"))
+        ax.legend(fontsize=8, loc="lower right")
+        ax.grid(True, alpha=0.25, linestyle=":")
+
+    plt.tight_layout()
+    path = os.path.join(MODELS_DIR, "regression_lines.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"   ✅ Regression lines chart saved to {path}")
     plt.close()
 
 
@@ -266,6 +329,20 @@ def main():
         }, model_path)
         print(f"  ✅ Saved to {model_path}")
 
+        # Save all-models bundle for model-selector feature
+        all_models_path = os.path.join(MODELS_DIR, f"models_{pos}.joblib")
+        joblib.dump({
+            "models":       models,   # all 4 fitted pipelines keyed by name
+            "best":         best_name,
+            "position":     pos,
+            "feature_cols": feature_cols,
+            "metrics": {
+                name: {k: v for k, v in res.items() if k not in ("preds", "y")}
+                for name, res in results.items()
+            },
+        }, all_models_path)
+        print(f"  ✅ All-models bundle saved to {all_models_path}")
+
         all_pos_results[pos]  = results
         best_pos_results[pos] = {
             "name": best_name,
@@ -291,6 +368,7 @@ def main():
     print("\n📊 Generating charts...")
     plot_model_comparison(all_pos_results)
     plot_position_accuracy(best_pos_results)
+    plot_regression_lines(all_pos_results, best_pos_results)
     if fi_model:
         plot_feature_importance(fi_model, feature_cols, fi_pos)
 

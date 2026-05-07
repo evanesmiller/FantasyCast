@@ -3,6 +3,7 @@ import { useState } from 'react'
 const CHARTS = [
   { file: 'position_accuracy.png', label: 'Per-Position Accuracy' },
   { file: 'model_comparison.png',  label: 'Model Comparison' },
+  { file: 'regression_lines.png',  label: 'Predicted vs Actual — Regression Lines' },
 ]
 
 function ChartImage({ file, label }) {
@@ -41,19 +42,7 @@ function ChartImage({ file, label }) {
 
 export default function ModelCharts() {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <p style={{
-        fontFamily:    "'Barlow Condensed', sans-serif",
-        fontWeight:    700,
-        fontSize:      '0.75rem',
-        letterSpacing: '0.2em',
-        color:         'var(--text-muted)',
-        textTransform: 'uppercase',
-        margin:        0,
-      }}>
-        Model Performance
-      </p>
-
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: 24 }}>
       {CHARTS.map(({ file, label }) => (
         <div key={file}>
           <p style={{

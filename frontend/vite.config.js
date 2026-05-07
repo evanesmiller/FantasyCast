@@ -10,6 +10,7 @@ export default defineConfig({
       '/players': 'http://localhost:8000',
       '/health':  'http://localhost:8000',
       '/charts':  'http://localhost:8000',
+      '/models':  'http://localhost:8000',
     },
   },
 })

@@ -61,11 +61,15 @@ export default function SeasonCard({ result }) {
     <div
       className="animate-fade-up"
       style={{
-        background:   'var(--surface)',
-        border:       '1px solid var(--border)',
-        borderRadius: 12,
-        padding:      '24px',
-        marginTop:    8,
+        background:    'var(--surface)',
+        border:        '1px solid var(--border)',
+        borderRadius:  12,
+        padding:       '24px',
+        marginTop:     8,
+        flex:          1,
+        minHeight:     0,
+        display:       'flex',
+        flexDirection: 'column',
       }}
     >
       {/* Header */}
@@ -115,7 +119,7 @@ export default function SeasonCard({ result }) {
       </div>
 
       {/* Week-by-week table */}
-      <div style={{ overflowY: 'auto', maxHeight: 340, borderRadius: 8, border: '1px solid var(--border)' }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', borderRadius: 8, border: '1px solid var(--border)' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
           <thead>
             <tr style={{
