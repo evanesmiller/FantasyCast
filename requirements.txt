@@ -1,0 +1,11 @@
+nflreadpy
+pyarrow
+pandas>=2.0.0,<3.0.0
+numpy
+scikit-learn
+xgboost
+joblib
+matplotlib
+fastapi
+uvicorn[standard]
+pydantic
