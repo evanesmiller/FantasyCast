@@ -23,6 +23,9 @@ Enter a player name. The backend projects all 17 regular-season games using:
 
 Each projected game is compared against the actual 2025 result, and summary accuracy stats (season error, % predictions within MAE) are displayed.
 
+### Model Selector
+A dropdown in the UI lets you choose which of the four trained models to use for any prediction. Each option is annotated with the positions for which that model achieved the lowest MAE (e.g. "XGBoost — Best for QB, WR"). Selecting nothing defaults to the position-optimal model automatically.
+
 ### Model Performance Charts
 Always-visible side panel showing per-position accuracy and model comparison charts generated during training.
 
@@ -45,7 +48,7 @@ FantasyCast/
 │   └── train_models.py             # Train per-position models, save best, generate charts
 ├── backend/
 │   ├── __init__.py
-│   └── main.py                     # FastAPI — /predict, /predict/season, /players, /charts
+│   └── main.py                     # FastAPI — /predict, /predict/season, /players, /charts, /models
 └── frontend/
     ├── index.html
     ├── main.jsx
@@ -100,7 +103,7 @@ python scripts/collect_data.py
 python scripts/process_data.py
 
 # Train per-position models (Linear Regression, Random Forest, Gradient Boosting, XGBoost)
-# Saves best model per position to models/ and generates accuracy charts
+# Saves all 4 models per position as models_{POS}.joblib bundles and generates accuracy charts
 python scripts/train_models.py
 
 # Start the FastAPI backend (http://localhost:8000)
@@ -120,8 +123,9 @@ Interactive API docs are available at `http://localhost:8000/docs` once the back
 |--------|----------|-------------|
 | `GET`  | `/health` | Liveness check + per-position model load status |
 | `GET`  | `/players?q={name}` | Autocomplete player search (searches 2025 roster) |
-| `POST` | `/predict` | Single-game PPR prediction with optional week lookup |
-| `GET`  | `/predict/season?player_name={name}` | Full 2025 season projection (17 games + bye) |
+| `GET`  | `/models` | Per-position best model name, all available models, and MAE metrics |
+| `POST` | `/predict` | Single-game PPR prediction; optional `model_name` overrides position-best |
+| `GET`  | `/predict/season?player_name={name}` | Full 2025 season projection; optional `model_name` param |
 | `GET`  | `/charts/{filename}` | Serve model performance chart PNGs |
 
 ---
@@ -130,11 +134,14 @@ Interactive API docs are available at `http://localhost:8000/docs` once the back
 
 No need to specify home/away or opponent — when a week is provided, the backend auto-detects the matchup from the 2025 schedule and applies the opponent's 2024 defensive rating.
 
+The optional `model_name` field selects which trained model to use. Valid values are `"Linear Regression"`, `"Random Forest"`, `"Gradient Boosting"`, and `"XGBoost"`. Omitting it (or passing `null`) uses the position-optimal model automatically.
+
 **Request**
 ```json
 {
   "player_name": "Justin Jefferson",
-  "week": 8
+  "week": 8,
+  "model_name": "XGBoost"
 }
 ```
 
@@ -159,9 +166,11 @@ Omitting `week` returns a prediction using career-average features with no actua
 
 ### `GET /predict/season` — Full season projection
 
+An optional `model_name` query parameter selects which model to use — same valid values as `/predict`. Omitting it defaults to the position-optimal model.
+
 **Request**
 ```
-GET /predict/season?player_name=Justin%20Jefferson
+GET /predict/season?player_name=Justin%20Jefferson&model_name=XGBoost
 ```
 
 **Response**
@@ -232,14 +241,22 @@ The player search endpoint queries the 2025 stats dataset, so only players who a
 
 ## Model Details
 
-Four separate models are trained — one per position (QB, RB, WR, TE). For each position, four model types are evaluated:
+Four separate model bundles are trained — one per position (QB, RB, WR, TE). Each bundle contains all four trained model types:
 
 - Linear Regression (baseline)
 - Random Forest
 - Gradient Boosting
 - XGBoost
 
-The model with the lowest MAE on the 2025 holdout test set is saved for that position.
+All four models are saved together in a `models_{POS}.joblib` bundle. The backend exposes the full bundle at runtime so the UI can offer a model selector dropdown. The position-optimal model (lowest MAE on the 2025 holdout test set) is used by default; any of the four can be chosen explicitly via the `model_name` request field.
+
+The `/models` endpoint returns this information for each position:
+```json
+{
+  "QB": { "best": "XGBoost", "options": ["Linear Regression", "Random Forest", "Gradient Boosting", "XGBoost"], "metrics": { ... } },
+  ...
+}
+```
 
 **Features used at inference time:**
 - 3-game and 5-game rolling averages for all key stats
