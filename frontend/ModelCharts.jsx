@@ -42,7 +42,7 @@ function ChartImage({ file, label }) {
 
 export default function ModelCharts() {
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: 24 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
       {CHARTS.map(({ file, label }) => (
         <div key={file}>
           <p style={{

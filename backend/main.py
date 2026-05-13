@@ -81,7 +81,8 @@ def _resolve_model(bundle: dict, model_name: str | None) -> tuple:
     """Returns (model, name_used, mae) — uses override or position-best."""
     if model_name and model_name in bundle["models"]:
         return bundle["models"][model_name], model_name, bundle["metrics"][model_name]["MAE"]
-    best = bundle["best"]
+    # Derive best dynamically from lowest MAE so stale "best" fields in saved bundles don't matter
+    best = min(bundle["metrics"], key=lambda n: bundle["metrics"][n]["MAE"])
     return bundle["models"][best], best, bundle["metrics"][best]["MAE"]
 
 
@@ -294,17 +295,20 @@ def search_players(q: str):
 
 @app.get("/models")
 def get_models():
-    return {
-        pos: {
-            "best":    bundle["best"],
-            "options": list(bundle["models"].keys()),
-            "metrics": {
-                name: {"MAE": round(m["MAE"], 3), "R2": round(m["R2"], 3)}
-                for name, m in bundle["metrics"].items()
-            },
+    out = {}
+    for pos, bundle in model_bundles.items():
+        metrics = {
+            name: {"MAE": round(m["MAE"], 3), "R2": round(m["R2"], 3)}
+            for name, m in bundle["metrics"].items()
         }
-        for pos, bundle in model_bundles.items()
-    }
+        # Derive best from lowest MAE so the dropdown always reflects post-tuning results
+        best = min(metrics, key=lambda n: metrics[n]["MAE"])
+        out[pos] = {
+            "best":    best,
+            "options": list(bundle["models"].keys()),
+            "metrics": metrics,
+        }
+    return out
 
 
 @app.post("/predict", response_model=PredictResponse)

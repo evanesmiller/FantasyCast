@@ -45,7 +45,8 @@ FantasyCast/
 ├── scripts/
 │   ├── collect_data.py             # Fetch 2022–2025 weekly stats + schedules via nflreadpy
 │   ├── process_data.py             # PPR scoring, rolling features, train/test split
-│   └── train_models.py             # Train per-position models, save best, generate charts
+│   ├── eda.py                      # Exploratory data analysis — four charts saved to models/eda/
+│   └── train_models.py             # Train, fine-tune (RandomizedSearchCV), and evaluate per-position models; generate charts
 ├── backend/
 │   ├── __init__.py
 │   └── main.py                     # FastAPI — /predict, /predict/season, /players, /charts, /models
@@ -102,8 +103,14 @@ python scripts/collect_data.py
 # Compute PPR points, engineer rolling features, split train (2022–2024) / test (2025)
 python scripts/process_data.py
 
-# Train per-position models (Linear Regression, Random Forest, Gradient Boosting, XGBoost)
-# Saves all 4 models per position as models_{POS}.joblib bundles and generates accuracy charts
+# Explore the processed dataset — generates four EDA charts in models/eda/
+python scripts/eda.py
+
+# Train per-position models (Linear Regression, Random Forest, Gradient Boosting, XGBoost),
+# fine-tune all three tree-based models via RandomizedSearchCV (n_iter=40, TimeSeriesSplit 5-fold),
+# save tuned models as best_model_{POS}.joblib + models_{POS}.joblib, and generate charts.
+# NOTE: This step can take several minutes depending on your machine — RandomizedSearchCV runs
+# 40 iterations × 5 CV folds × 3 tree models × 4 positions = 2,400 model fits in total.
 python scripts/train_models.py
 
 # Start the FastAPI backend (http://localhost:8000)
@@ -239,6 +246,19 @@ The player search endpoint queries the 2025 stats dataset, so only players who a
 
 ---
 
+## Exploratory Data Analysis
+
+Running `python scripts/eda.py` after `process_data.py` generates four charts in `models/eda/`:
+
+| Chart | File | What it shows |
+|---|---|---|
+| PPR Distribution | `eda_points_distribution.png` | Box plots of PPR points per position, broken out by season — shows spread, median, and outliers across 2022–2025 |
+| Feature Correlations | `eda_correlations.png` | Top 20 engineered features by Pearson correlation with the PPR target (all positions combined) |
+| Raw Stat vs PPR | `eda_stat_vs_ppr.png` | Scatter of the most predictive raw stat for each position (passing yards → QB, rushing yards → RB, receiving yards → WR/TE) with regression line and r value |
+| Weekly Trends | `eda_weekly_trends.png` | Average PPR per week faceted by position, with one line per season — reveals bye-week dips and late-season consistency patterns |
+
+---
+
 ## Model Details
 
 Four separate model bundles are trained — one per position (QB, RB, WR, TE). Each bundle contains all four trained model types:
@@ -248,7 +268,24 @@ Four separate model bundles are trained — one per position (QB, RB, WR, TE). E
 - Gradient Boosting
 - XGBoost
 
-All four models are saved together in a `models_{POS}.joblib` bundle. The backend exposes the full bundle at runtime so the UI can offer a model selector dropdown. The position-optimal model (lowest MAE on the 2025 holdout test set) is used by default; any of the four can be chosen explicitly via the `model_name` request field.
+### Training pipeline
+
+1. **Initial training** — all four model types are fit on the training set and evaluated on the 2025 holdout test set (MAE, RMSE, R²). The model with the lowest test MAE is selected as the position's best.
+2. **Fine-tuning** — `RandomizedSearchCV` (n_iter=40, scored on MAE) is run using **`TimeSeriesSplit` with 5 folds** instead of random k-fold. Training rows are sorted by `(season, week)` before splitting so each validation fold is always chronologically later than its training fold — this prevents future weeks from leaking into training folds and gives CV scores that reflect real generalization. The search grid is deliberately offset from the initial defaults so the search explores genuinely new territory rather than rediscovering the starting parameters.
+
+   Linear Regression wins the initial comparison for all positions, which is itself a meaningful result: the relationship between a player's recent rolling stats and their next-week PPR score is largely linear, so added tree complexity does not help. Because Linear Regression has no hyperparameters to tune, fine-tuning is applied to the **best tree-based model** for each position (whichever of Random Forest, Gradient Boosting, or XGBoost had the lowest MAE). This keeps the tuning step substantive and demonstrates the process even when the overall winner cannot be tuned.
+
+| Model | Parameters searched |
+|---|---|
+| Random Forest | `n_estimators`, `max_depth`, `min_samples_leaf`, `max_features` |
+| Gradient Boosting | `n_estimators`, `learning_rate`, `max_depth`, `subsample` |
+| XGBoost | `n_estimators`, `learning_rate`, `max_depth`, `subsample`, `colsample_bytree` |
+
+The tuned tree-based model replaces its untuned version in both saved bundles, but the overall best model (Linear Regression) is used for predictions by default.
+
+3. **Evaluation** — the tuned model is re-evaluated on the test set. A `tuning_comparison.png` chart is generated showing the before/after MAE for each position.
+
+All four models are saved together in a `models_{POS}.joblib` bundle (with the best model replaced by its tuned version). The backend exposes the full bundle at runtime so the UI can offer a model selector dropdown. The position-optimal tuned model is used by default; any of the four can be chosen explicitly via the `model_name` request field.
 
 The `/models` endpoint returns this information for each position:
 ```json
@@ -265,4 +302,4 @@ The `/models` endpoint returns this information for each position:
 - Home/away flag (`is_home`)
 - Week number
 
-**Train/test split:** 2022–2024 seasons for training, 2025 season as the holdout test — no 2025 data is seen during training.
+**Train/test split:** 2022–2024 seasons for training, 2025 season as the holdout test — no 2025 data is seen during training or fine-tuning.

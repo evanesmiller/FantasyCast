@@ -1,10 +1,11 @@
 """
-Model Training & Evaluation
-============================
+Model Training, Fine-Tuning & Evaluation
+==========================================
 - Trains one model per position (QB, RB, WR, TE)
 - Candidates: Linear Regression, Random Forest, Gradient Boosting, XGBoost
-- Saves the best model per position as models/best_model_{POS}.joblib
-- Generates per-position accuracy and model comparison charts
+- Fine-tunes the best model per position via RandomizedSearchCV (n_iter=40, TimeSeriesSplit 5-fold)
+- Saves the tuned model per position as models/best_model_{POS}.joblib
+- Generates per-position accuracy, model comparison, and tuning impact charts
 
 Run: python scripts/train_models.py
 """
@@ -18,6 +19,7 @@ import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error, r2_score
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from xgboost import XGBRegressor
@@ -90,6 +92,78 @@ def build_models():
             )),
         ]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Hyperparameter search spaces (Pipeline step prefix: "model__")
+# Linear Regression has no meaningful continuous hyperparameters to search.
+# ---------------------------------------------------------------------------
+
+# Grids are intentionally offset from the build_models() defaults so the search
+# explores genuinely new territory rather than rediscovering the starting point.
+PARAM_GRIDS = {
+    "Random Forest": {
+        "model__n_estimators":     [150, 250, 350, 500, 700],
+        "model__max_depth":        [6, 9, 14, 20, None],
+        "model__min_samples_leaf": [1, 3, 6, 10],
+        "model__max_features":     ["sqrt", "log2", 0.4, 0.6],
+    },
+    "Gradient Boosting": {
+        "model__n_estimators":  [150, 250, 400, 600],
+        "model__learning_rate": [0.005, 0.02, 0.07, 0.12],
+        "model__max_depth":     [2, 4, 6, 7],
+        "model__subsample":     [0.6, 0.75, 0.85, 1.0],
+    },
+    "XGBoost": {
+        "model__n_estimators":     [150, 300, 500, 700],
+        "model__learning_rate":    [0.005, 0.02, 0.07, 0.12],
+        "model__max_depth":        [3, 5, 7, 9],
+        "model__subsample":        [0.6, 0.75, 0.85, 1.0],
+        "model__colsample_bytree": [0.6, 0.75, 0.85, 1.0],
+    },
+}
+
+
+def fine_tune_model(model, model_name, X_train, y_train, X_test, y_test,
+                    season_col=None, week_col=None):
+    """
+    RandomizedSearchCV with TimeSeriesSplit over the model's param grid.
+    Training rows are sorted chronologically before splitting so each
+    validation fold is always later in time than its training fold.
+    """
+    param_grid = PARAM_GRIDS.get(model_name)
+    if param_grid is None:
+        print(f"  ⚙️  No tuning grid for {model_name} — skipping")
+        return model, None
+
+    # Sort by (season, week) so TimeSeriesSplit respects temporal order
+    if season_col is not None and week_col is not None:
+        order = X_train.assign(_s=season_col, _w=week_col).sort_values(["_s", "_w"]).index
+        X_tr = X_train.loc[order]
+        y_tr = y_train.loc[order]
+    else:
+        X_tr, y_tr = X_train, y_train
+
+    tscv = TimeSeriesSplit(n_splits=5)
+    print(f"  🔍 Fine-tuning {model_name} (RandomizedSearchCV n_iter=40, TimeSeriesSplit 5-fold)...",
+          flush=True)
+    search = RandomizedSearchCV(
+        model,
+        param_grid,
+        n_iter=40,
+        cv=tscv,
+        scoring="neg_mean_absolute_error",
+        random_state=42,
+        n_jobs=-1,
+        refit=True,
+    )
+    search.fit(X_tr, y_tr)
+    tuned = search.best_estimator_
+    cv_mae = -search.best_score_
+    print(f"     CV MAE: {cv_mae:.3f}  Best params: {search.best_params_}")
+    metrics = evaluate(tuned, X_test, y_test)
+    print(f"     Test  MAE: {metrics['MAE']:.3f}  R²: {metrics['R2']:.3f}")
+    return tuned, metrics
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +319,100 @@ def plot_regression_lines(all_pos_results: dict, best_pos_results: dict):
     plt.close()
 
 
+MODEL_SHORT   = {"Linear Regression": "LR", "Random Forest": "RF",
+                  "Gradient Boosting": "GB", "XGBoost": "XGB"}
+MODEL_COLORS  = {"Linear Regression": "#aaaaaa", "Random Forest": "#55A868",
+                 "Gradient Boosting": "#C44E52", "XGBoost":        "#8172B3"}
+TUNABLE       = ["Random Forest", "Gradient Boosting", "XGBoost"]
+
+
+def plot_tuning_comparison(all_tuning: dict):
+    """
+    2×2 grid — one subplot per position.
+    Each subplot shows all four models: LR as a single bar (no tuning),
+    RF/GB/XGB as a before (gray) + after (colored) pair.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle(
+        "MAE Before vs. After Hyperparameter Tuning — All Models by Position\n"
+        "(RandomizedSearchCV, n_iter=40, TimeSeriesSplit 5-fold  |  LR has no tunable parameters)",
+        fontsize=12, fontweight="bold",
+    )
+
+    model_order = ["Linear Regression", "Random Forest", "Gradient Boosting", "XGBoost"]
+    width = 0.32
+
+    for ax, pos in zip(axes.flat, POSITIONS):
+        if pos not in all_tuning:
+            ax.set_visible(False)
+            continue
+
+        tuning = all_tuning[pos]
+        tick_positions = []
+        tick_labels    = []
+        x_cursor       = 0.0
+
+        for name in model_order:
+            entry  = tuning[name]
+            color  = MODEL_COLORS[name]
+            short  = MODEL_SHORT[name]
+
+            if name == "Linear Regression":
+                bar = ax.bar(x_cursor, entry["before"], width * 1.3,
+                             color=color, edgecolor="black", linewidth=0.6, alpha=0.85)
+                ax.text(x_cursor, entry["before"] + 0.05,
+                        f"{entry['before']:.2f}", ha="center", fontsize=8)
+                tick_positions.append(x_cursor)
+                tick_labels.append(short)
+                x_cursor += 1.1
+            else:
+                before_x = x_cursor
+                after_x  = x_cursor + width + 0.04
+                center_x = (before_x + after_x) / 2
+
+                ax.bar(before_x, entry["before"], width,
+                       color="#aaaaaa", edgecolor="black", linewidth=0.6, alpha=0.75)
+                ax.bar(after_x,  entry["after"],  width,
+                       color=color, edgecolor="black", linewidth=0.6, alpha=0.9)
+
+                ax.text(before_x, entry["before"] + 0.05,
+                        f"{entry['before']:.2f}", ha="center", fontsize=7.5)
+
+                diff  = entry["before"] - entry["after"]
+                label = f"{entry['after']:.2f}"
+                if abs(diff) >= 0.005:
+                    label += f"\n({'−' if diff >= 0 else '+'}{abs(diff):.2f})"
+                ax.text(after_x, entry["after"] + 0.05,
+                        label, ha="center", fontsize=7.5, linespacing=1.3)
+
+                tick_positions.append(center_x)
+                tick_labels.append(short)
+                x_cursor += 1.1
+
+        all_vals = [v for e in tuning.values() for v in (e["before"], e["after"])]
+        y_min = max(0, min(all_vals) * 0.9)
+        y_max = max(all_vals) * 1.18
+        ax.set_ylim(y_min, y_max)
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels, fontsize=11)
+        ax.set_ylabel("MAE (points)")
+        ax.set_title(pos, fontsize=13, fontweight="bold", color=POS_COLORS[pos])
+        ax.grid(axis="y", alpha=0.2, linestyle=":")
+
+        # Legend (once, bottom-right)
+        from matplotlib.patches import Patch
+        ax.legend(handles=[
+            Patch(color="#aaaaaa", label="Before tuning"),
+            Patch(color="#4C72B0", label="After tuning (color = model)"),
+        ], fontsize=8, loc="upper right")
+
+    plt.tight_layout()
+    path = os.path.join(MODELS_DIR, "tuning_comparison.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"   ✅ Tuning comparison chart saved to {path}")
+    plt.close()
+
+
 def plot_feature_importance(model, feature_cols: list, pos: str):
     inner = model.named_steps.get("model", model)
     if not hasattr(inner, "feature_importances_"):
@@ -278,6 +446,7 @@ def main():
 
     all_pos_results  = {}   # pos → {model_name → metrics}
     best_pos_results = {}   # pos → summary dict for charts
+    all_tuning       = {}   # pos → {model_name → {before, after}}
     fi_model         = None
     fi_pos           = None
 
@@ -314,13 +483,45 @@ def main():
             print(f"MAE={metrics['MAE']:.3f}  RMSE={metrics['RMSE']:.3f}  R²={metrics['R2']:.3f}")
 
         best_name  = min(results, key=lambda m: results[m]["MAE"])
-        best_model = models[best_name]
         best_mae   = results[best_name]["MAE"]
         print(f"\n  🏆 Best: {best_name}  (MAE: {best_mae:.3f})")
+        if best_name == "Linear Regression":
+            print(f"  ℹ️  Linear Regression wins — no hyperparameters to tune. "
+                  f"Fine-tuning all tree-based models for comparison.")
+
+        # Fine-tune every tree-based model; LR is recorded as-is.
+        print(f"\n  ── Fine-tuning ──")
+        pos_tuning = {"Linear Regression": {
+            "before": results["Linear Regression"]["MAE"],
+            "after":  results["Linear Regression"]["MAE"],
+        }}
+        for tree_name in TUNABLE:
+            tree_mae = results[tree_name]["MAE"]
+            tuned_model, tuned_metrics = fine_tune_model(
+                models[tree_name], tree_name, X_train, y_train, X_test, y_test,
+                season_col=train_pos["season"],
+                week_col=train_pos["week"],
+            )
+            if tuned_metrics is not None:
+                improvement = tree_mae - tuned_metrics["MAE"]
+                print(f"  {'📈' if improvement >= 0 else '📉'} {tree_name}: "
+                      f"{tree_mae:.3f} → {tuned_metrics['MAE']:.3f} "
+                      f"({'−' if improvement >= 0 else '+'}{abs(improvement):.3f})")
+                models[tree_name]  = tuned_model
+                results[tree_name] = tuned_metrics
+                pos_tuning[tree_name] = {"before": tree_mae, "after": tuned_metrics["MAE"]}
+            else:
+                pos_tuning[tree_name] = {"before": tree_mae, "after": tree_mae}
+        all_tuning[pos] = pos_tuning
+
+        # Re-determine best after tuning — a tuned tree model may now outperform LR
+        best_name = min(results, key=lambda m: results[m]["MAE"])
+        best_mae  = results[best_name]["MAE"]
+        print(f"\n  🏆 Post-tuning best: {best_name}  (MAE: {best_mae:.3f})")
 
         model_path = os.path.join(MODELS_DIR, f"best_model_{pos}.joblib")
         joblib.dump({
-            "model":        best_model,
+            "model":        models[best_name],
             "model_name":   best_name,
             "position":     pos,
             "feature_cols": feature_cols,
@@ -353,8 +554,9 @@ def main():
 
         # Use the first tree-based best model for feature importance chart
         if fi_model is None and hasattr(
-                best_model.named_steps.get("model", best_model), "feature_importances_"):
-            fi_model = best_model
+                models[best_name].named_steps.get("model", models[best_name]),
+                "feature_importances_"):
+            fi_model = models[best_name]
             fi_pos   = pos
 
     # Summary table
@@ -369,6 +571,7 @@ def main():
     plot_model_comparison(all_pos_results)
     plot_position_accuracy(best_pos_results)
     plot_regression_lines(all_pos_results, best_pos_results)
+    plot_tuning_comparison(all_tuning)
     if fi_model:
         plot_feature_importance(fi_model, feature_cols, fi_pos)
 
